@@ -1,0 +1,477 @@
+---
+title: "Cell communication"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(nichenetr)
+library(pheatmap)
+library(tidyverse)
+library(RColorBrewer)
+library(DESeq2)
+```
+
+# Load the data
+```{r}
+memory.limit(size=90000)
+seurat <- readRDS("C:/.../Full dataset.rds")
+```
+
+#Load DSA results table
+```{r}
+result_table <- read.csv("C:/.../dsa_results_ANOVA.csv",stringsAsFactors = F)
+```
+
+
+# Prepare NicheNet prior model
+```{r}
+ligand_target_matrix <- readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+```{r}
+lr_network <- readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+head(lr_network)
+```
+```{r}
+weighted_networks <- readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+```
+
+
+
+```{r}
+seurat$GA <- factor(seurat$GA)
+```
+```{r}
+levels(seurat$GA) <- c("GA_14.1", "GA_14.3", "GA_15.1",  "GA_15.5",  "GA_16.0", "GA_16.3", "GA_17.5", "GA_18.2", "GA_19.0")
+```
+```{r}
+seurat$celltype <- seurat$seurat_clusters
+```
+
+
+# Differential state analysis
+```{r}
+library(muscat)
+```
+
+#Add 1 factor for all clusters
+```{r}
+seurat$AllClusters <- "NA"
+seurat$AllClusters[seurat$seurat_clusters %in% c("0", "1", "2", "3", "4", "5", "6", "7", "8")] <- "AllCells"
+```
+
+
+# Run NicheNet <<<-
+-> Start with GA_14.1 vs GA_19.0 -> Play with logFC and frequencies.
+```{r}
+clusters <- result_table %>%
+  filter(padj <= 0.01 &
+  abs(fval) >= 0) %>%
+  select(Cluster) %>%
+  group_by(Cluster) %>%
+  summarise(nGene = n())
+clusters
+```
+
+```{r}
+receiver_clusters <- filter(clusters, nGene >= 100) %>%
+  pull(Cluster)
+receiver_clusters
+```
+
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[seurat$seurat_clusters == cluster]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+```{r}
+runNicheNet <- function(receiver){
+  print(paste0("Performing analysis on cluster: ", receiver))
+  #define receiver
+  expressed_genes_receiver <- getFrequency(receiver)
+  background_expressed_genes <- expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+  
+  #define senders
+  sender_celltypes <- clusters$Cluster[which(clusters$Cluster %in% result_table$Cluster)]
+  list_expressed_genes_sender <- sender_celltypes %>% unique() %>% lapply(getFrequency) 
+  expressed_genes_sender <- list_expressed_genes_sender %>% unlist() %>% unique()
+  
+  #get Hyx genes of interest
+  geneset_oi <- filter(result_table, padj <= 0.01 & 
+                      abs(fval) >= 0 &
+                       Cluster == receiver)  %>% 
+                       pull(Gene)
+  #geneset_oi <- filter(geneset_oi, GA_14.1.frq >= 0.1 | GA_19.0.frq >= 0.1) %>% pull(gene) <-<-
+  
+  #define potential ligands for genes
+  ligands <- lr_network %>% pull(from) %>% unique()
+  receptors <- lr_network %>% pull(to) %>% unique()
+  expressed_ligands <- intersect(ligands,expressed_genes_sender)
+  expressed_receptors <- intersect(receptors,expressed_genes_receiver)
+  potential_ligands <- lr_network %>% 
+    filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% 
+    pull(from) %>% 
+    unique()
+  
+  #perform nichenet ligand activity analysis: rank potential ligands based on the presence
+  #of their target genes in the gene set of interest (compared to the background set of genes)
+  ligand_activities <- predict_ligand_activities(geneset = geneset_oi, 
+                                              background_expressed_genes = background_expressed_genes, 
+                                              ligand_target_matrix = ligand_target_matrix, 
+                                              potential_ligands = potential_ligands)
+  ligand_activities <- ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(dplyr::desc(pearson)))
+  ligand_activities$receiver_cluster <- receiver
+  
+  return(ligand_activities)
+}
+```
+
+```{r}
+Sys.time()
+ligand_activities <- lapply(receiver_clusters, runNicheNet) 
+Sys.time()
+```
+
+```{r}
+ligand_activities <- do.call("rbind", ligand_activities)
+```
+
+```{r}
+saveRDS(ligand_activities, file="C:/.../ligand_activities.rds")
+```
+
+```{r}
+ligand_activities <- readRDS("C:/.../ligand_activities.rds")
+```
+
+```{r}
+pearson_scores <- ggplot(ligand_activities, aes(x=receiver_cluster, y=pearson)) + 
+  geom_jitter(size=0.25) + 
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+pearson_scores
+```
+
+```{r}
+seurat$celltype <- seurat$seurat_clusters
+```
+
+
+
+# Ligand plot functions
+## Ligand activity
+# Summary figures for each subset
+```{r}
+subset_dict <- data.frame(subset = seurat$AllClusters,
+                          CellType = seurat$celltype)
+subset_dict <- unique(subset_dict)
+subset_dict <- separate(subset_dict, subset, c("subset", "clusterID"))
+subset_dict$clusterID <- NULL
+subset_dict$subset <- as.character(subset_dict$subset)
+subset_dict$AllClusters <- as.character(subset_dict$CellType)
+```
+
+```{r}
+ligand_auroc_heatmap <- function(subset_name, plot_width, plot_height){
+  
+  subset_clusters <- subset_dict %>% filter(subset == subset_name) %>% pull(CellType)
+  
+  ligands <- ligand_activities %>%
+    filter(receiver_cluster %in% subset_clusters &
+           rank <= 20)
+  
+  ligand_mat <- ligands[,c("test_ligand", "auroc", "receiver_cluster")]
+  ligand_mat <- pivot_wider(ligand_mat, names_from="receiver_cluster", values_from="auroc")
+  ligand_mat <- as.data.frame(ligand_mat)
+  ligand_list <- ligand_mat$test_ligand
+  cell_types <- colnames(ligand_mat)[2:ncol(ligand_mat)]
+  ligand_mat <- as.matrix(ligand_mat[,2:ncol(ligand_mat)])
+  rownames(ligand_mat) <- ligand_list
+  colnames(ligand_mat) <- cell_types
+  ligand_mat[is.na(ligand_mat)] <- 0
+  ligand_mat[ligand_mat > 0] <- 1
+  
+  #Can't do clustered columns if only one cell type
+  if(length(unique(ligands$receiver_cluster)) > 1){
+    ligand_heatmap <- pheatmap(ligand_mat,
+         color = c("whitesmoke", "firebrick"),
+         legend = F,
+         cluster_rows=T,
+         cluster_cols=T,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0("C:/.../", 
+                         subset_name, "_ligand_activity.png"),
+         width = plot_width,
+         height = plot_height)
+  } else{
+    ligand_heatmap <- pheatmap(ligand_mat,
+         color = c("firebrick", "firebrick"),
+         breaks = c(0,1),
+         legend = F,
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0("C:/.../", 
+                         subset_name, "_ligand_activity.png"),
+         width = plot_width,
+         height = plot_height)
+  }
+  
+  return(ligand_heatmap)
+}
+```
+
+```{r}
+unique(subset_dict$subset)
+```
+
+```{r}
+ligand_all <- ligand_auroc_heatmap("AllCells", 2, 12)
+```
+
+
+```{r}
+Idents(seurat) <- "seurat_clusters"
+```
+
+## Average expression
+```{r}
+getAvgExp <- function(cluster, gene_order){
+  cells <- colnames(seurat)[seurat$seurat_clusters == cluster & seurat$GA == "GA_19.0"]
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[gene_order,cells]))
+  return(avg)
+}
+```
+
+```{r}
+ligand_expression_heatmap <- function(ligand_heatmap, subset_name,
+                                      plot_height){
+  
+  #Get ligand list from heatmap
+  gene_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  
+  clusters <- levels(Idents(seurat))
+  ligand_avg <- lapply(clusters, getAvgExp, gene_order=gene_order)
+  ligand_avg <- do.call("cbind", ligand_avg)
+  colnames(ligand_avg) <- clusters
+  
+  ligand_exp_heatmap <- pheatmap(ligand_avg,
+         color = colorRampPalette(c("whitesmoke", "purple"))(100),
+         breaks = seq(0, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0("C:/..../", subset_name, "_ligand_expression.png"),
+         width=7, 
+         height=plot_height)
+  
+}
+```
+
+```{r}
+ligand_expression_heatmap(ligand_all, "AllCells", 10)
+```
+
+## Fold change
+```{r}
+getFoldChange <- function(cluster, gene_order){
+  filtered_table <- filter(result_table, Cluster == cluster &
+                             padj <= 0.01)
+  
+  fc <- filtered_table$fval
+  names(fc) <- as.character(filtered_table$Gene)
+  fc <- fc[gene_order]
+  names(fc) <- gene_order
+  fc[is.na(fc)] <- 0
+  
+  return(fc)
+}
+```
+
+```{r}
+ligand_fc_heatmap <- function(ligand_heatmap, subset_name, plot_height){
+  gene_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  clusters <- levels(Idents(seurat))
+  
+  fold_change <- lapply(clusters, getFoldChange, gene_order = gene_order)
+  
+  fold_change <- do.call("cbind", fold_change)
+  colnames(fold_change) <- clusters
+  
+  ligand_fc_heatmap <- pheatmap(fold_change,
+         color = colorRampPalette(brewer.pal(8, "Blues"))(100),
+         breaks = seq(-0, 20, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0("C:/..../", subset_name, "_ligand_foldchange.png"),
+         width=7, height=plot_height)
+}
+```
+
+```{r}
+ligand_fc_heatmap(ligand_all, "AllCells", 10)
+```
+
+# Putative receptors
+## Quick check on distribution of ligand-receptor weights in the network
+```{r}
+hist(weighted_networks_lr$weight, breaks=50)
+```
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[seurat$seurat_clusters == cluster]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+
+## Plot receptor weights
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[Idents(seurat) == cluster]
+  receptors <- lr_network %>% pull(to) %>% unique()
+  receptors_check <- receptors[which(receptors %in% rownames(seurat))]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[receptors_check, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+```{r}
+receptor_interaction <- function(subset_name, ligand_heatmap, plot_width, plot_height){
+  #Get all cell types
+  subset_clusters <- subset_dict %>% filter(subset == subset_name) %>% pull(AllClusters)
+  
+  #Get ordered ligand list from heatmap object
+  ligand_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  
+  #Define target receptors
+  receptors <- lr_network %>% pull(to) %>% unique()
+  ##Iterate through clusters checking for frequency of expressing cells
+  expressed_receptors <- lapply(subset_clusters, getFrequency)
+  expressed_receptors <- unique(unlist(expressed_receptors))
+  ##Filter network
+  lr_network_top = lr_network %>% 
+    filter(from %in% ligand_order & to %in% expressed_receptors) %>% 
+    distinct(from,to)
+  best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+  
+  #Find ligand-receptor network
+  lr_network_top_df_large = weighted_networks_lr %>% 
+    filter(from %in% ligand_order & to %in% best_upstream_receptors)
+  ##Make a wide format
+  lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+  lr_network_top_matrix = lr_network_top_df %>% 
+    select(-to) %>% 
+    as.matrix() %>% 
+    magrittr::set_rownames(lr_network_top_df$to)
+  
+  #Cluster receptors
+  dist_receptors = dist(lr_network_top_matrix, method = "binary")
+  hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+  order_receptors = hclust_receptors$labels[hclust_receptors$order]
+  
+  #Test heatmap
+  receptor_mat <- t(lr_network_top_matrix[order_receptors, ligand_order])
+  
+  ligand_receptor_heatmap <- pheatmap(receptor_mat,
+         color = colorRampPalette(c("whitesmoke", "darkgreen"))(100),
+         breaks = seq(0, 1, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0("C:/.../", subset_name, "_receptor_activity.png"),
+         width=plot_width, 
+         height=plot_height)
+  return(ligand_receptor_heatmap)
+}
+```
+
+```{r}
+receptor_all <- receptor_interaction("AllCells", ligand_all, 25, 10)
+```
+
+
+# Receptor expression in receivers
+```{r}
+getAvgExp <- function(cluster, gene_order){
+  cells <- colnames(seurat)[seurat$seurat_clusters == cluster] #& seurat$GA == "GA_19.0"]
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[gene_order,cells]))
+  return(avg)
+}
+```
+
+```{r}
+receptor_expression_heatmap <- function(receptor_heatmap, ligand_heatmap,
+                                      subset_name, plot_width, plot_height){
+  
+  #Get ligand list from heatmap
+  gene_order <- receptor_heatmap$gtable$grobs[[2]]$label
+  clusters <- ligand_heatmap$gtable$grobs[[2]]$label
+  
+  receptor_avg <- lapply(clusters, getAvgExp, gene_order=gene_order)
+  receptor_avg <- do.call("cbind", receptor_avg)
+  colnames(receptor_avg) <- clusters
+  
+  receptor_avg <- t(receptor_avg)
+  
+  ligand_exp_heatmap <- pheatmap(receptor_avg,
+         color = colorRampPalette(c("whitesmoke", "purple"))(100),
+         breaks = seq(0, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         legend=F,
+         border_color = "black",
+         filename=paste0("C:/.../", subset_name, "_receptor_expression.png"),
+         width=plot_width, 
+         height=plot_height)
+}
+```
+
+```{r}
+receptor_expression_heatmap(receptor_all, ligand_all, "Allcells", 25, 3)
+```

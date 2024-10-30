@@ -1,0 +1,134 @@
+---
+title: "Circos plot"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(nichenetr)
+library(pheatmap)
+library(tidyverse)
+library(RColorBrewer)
+library(DESeq2)
+library(DMwR2)
+library(Polychrome)
+library(circlize)
+```
+
+
+```{r}
+seurat <- readRDS("C:/.../Full dataset.rds")
+```
+
+#Visualize
+```{r}
+DimPlot(seurat, label="T")
+DimPlot(seurat, group.by="CellType")
+```
+
+
+# Turn on output device
+```{r}
+pdf("C:/.../Circos_plot.pdf",
+    width=10, height=10)
+```
+
+# Load data in
+```{r}
+test_dat <- read.csv("C:/.../LR_summary.csv")
+test_dat <- arrange(test_dat, match(Sender, cell_type_order), Ligand)
+test_dat$from <- paste0(test_dat$Sender, "_", test_dat$Ligand)
+test_dat$to <- test_dat$Receiver
+test_dat$value <- 1
+df <- data.frame(from = test_dat$from,
+                 to = test_dat$to, 
+                 value= test_dat$value)
+```
+
+# Organize by cell type groups -> only write ligand senders here
+```{r}
+cell_type_order <- c("C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+```
+
+#Set up break distances between sectors -> these are sectors for ligand senders
+```{r}
+ligand_counts <- test_dat[,c("Sender", "Ligand")]
+ligand_counts <- unique(ligand_counts)
+ligand_counts <- table(ligand_counts$Sender)[cell_type_order]
+receiver_count <- length(unique(test_dat$Receiver))
+
+gaps <- c(rep(1.25, ligand_counts[1] - 1), 5,
+          rep(1.25, ligand_counts[2] - 1), 5,
+          rep(1.25, ligand_counts[3] - 1), 5,
+          rep(1.25, ligand_counts[4] - 1), 5,
+          rep(1.25, ligand_counts[5] - 1), 5,
+          rep(1.25, ligand_counts[6] - 1), 5,
+          rep(1.25, ligand_counts[7] - 1), 5,
+          rep(1.25, ligand_counts[8] - 1), 5,
+          rep(1.25, ligand_counts[9] - 1), 10,#Left sender-receiver border
+          rep(1.25, receiver_count-1), 10) #receiver end
+```
+
+
+
+#Sender cell types
+```{r}
+sender_list <- unique(test_dat$Sender)
+receiver_list <- unique(test_dat$Receiver)
+```
+
+
+# Prepare colours
+-> I deleted () behind cols "cols()", otherwise it didn't run -> found this advice on naklih.com
+```{r}
+pdf("C:/..../Circos_plot.pdf",
+    width=10, height=10)
+
+
+cols <- kelly.colors()[2:10]
+names(cols) <- sender_list
+test_dat$cols <- cols[test_dat$Sender] 
+cols <- test_dat[,c("from", "cols")] #here (and later) if you write "Sender" instead of "from >> It will color each ligand separatelly (not just by cell population)
+cols <- unique(cols)
+tmp_names <- cols$from
+cols <- cols$cols
+names(cols) <- tmp_names
+cols <- c(cols, rep("grey40", length(receiver_list)))
+names(cols)[0] <- receiver_list #Adjust index to appropriate length
+
+circos.clear()
+circos.par(track.height = 0.125, gap.after = gaps)
+
+chordDiagram(df,annotationTrack = c("grid"), scale=F,
+             preAllocateTracks = 2, 
+             directional = 1, 
+             grid.col = cols
+             #direction.type = "arrows",
+             #link.arr.width = 0.15,
+             #link.arr.length = 0.15,
+             #big.gap = 20, small.gap = 1
+             )
+
+tmp <- test_dat[,c("from", "Ligand")]
+tmp <- unique(tmp)
+###
+
+circos.track(track.index = 2, track.height = uh(1, "inches"),
+             panel.fun = function(x, y) {
+               circos.text(CELL_META$xcenter, CELL_META$ylim[1], tmp$Ligand[CELL_META$sector.numeric.index], 
+                           facing = "clockwise", cex = 0.75,
+                           niceFacing = TRUE, adj = c(0, 0.5))}, 
+             bg.border = NA) # here set bg.border to NA is important
+
+
+for(i in 1:length(sender_list)){
+  ligand_list <- test_dat %>% filter(Sender == sender_list[i]) %>% pull(from)
+  highlight.sector(ligand_list, track.index = 1, col = "grey80",
+                   text = "", cex = 0.8, text.col = "grey80",
+                   niceFacing = T, border = T, padding = c(0,0, -0.75, 0))
+}
+
+dev.off()
+```
+
+

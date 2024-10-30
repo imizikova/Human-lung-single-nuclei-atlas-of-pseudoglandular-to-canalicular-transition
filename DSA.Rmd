@@ -1,0 +1,65 @@
+---
+title: "DSA"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+library(muscat)
+library(SingleCellExperiment)
+```
+
+# Load the data
+```{r}
+seurat <- readRDS("C:/..../Full dataset.rds")
+```
+
+# set up differential expression
+Run ANOVA on each cell type separately
+```{r}
+diffExpTest <- function(gene, seuratObj){
+  dat <- seuratObj@meta.data
+  dat$Gene <- seuratObj[["RNA"]]@data[gene,]
+  model_res <- lm(dat$Gene ~ dat$GA)
+  model_anova <- anova(model_res)
+  res <- data.frame(Gene = gene,
+                    pval = model_anova$`Pr(>F)`[1],
+                    fval = model_anova$`F value`[1])
+  return(res)
+}
+
+testGenes <- function(cluster){
+  seurat_subset <- subset(seurat, idents = cluster)
+  DefaultAssay(seurat_subset) <- "RNA"
+  var_dat <- sctransform::vst(seurat_subset[["RNA"]]@counts)
+  var_dat <- var_dat$gene_attr
+  var_dat$Gene <- rownames(var_dat)
+  good_genes <- var_dat %>% top_n(2000, residual_variance) %>%
+    filter(detection_rate >= 0.05) %>%
+    pull(Gene)
+  
+  #Run differential expression function on all good genes in this seurat subset
+  diff_exp_results <- lapply(good_genes, diffExpTest, seuratObj = seurat_subset)
+  diff_exp_results <- do.call("rbind", diff_exp_results)
+  diff_exp_results$Cluster <- cluster 
+  
+  return(diff_exp_results)
+}
+
+# Run the above functions on every cluster in the Seurat object
+
+cluster_list <- as.character(unique(Idents(seurat)))
+result_table <- lapply(cluster_list, testGenes)
+result_table <- do.call("rbind", result_table)
+result_table$padj <- p.adjust(result_table$pval, method="BH")
+```
+
+```{r}
+write.csv(result_table,"C:/..../dsa_results_ANOVA.csv" )
+```
+
+

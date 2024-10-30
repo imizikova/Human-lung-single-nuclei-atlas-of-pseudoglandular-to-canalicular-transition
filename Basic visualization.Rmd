@@ -1,0 +1,158 @@
+---
+title: "Basic visualization"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+library(tidyr)
+```
+
+```{r}
+seurat <- readRDS("C:/Users/.../Full dataset.rds")
+```
+
+#Add CellType
+```{r}
+seurat$CellType <- "NA"
+seurat$CellType[seurat$seurat_clusters %in% c("0")] <- "Stroma_1"
+seurat$CellType[seurat$seurat_clusters %in% c("1")] <- "Epi_distal airway"
+seurat$CellType[seurat$seurat_clusters %in% c("2")] <- "Stroma_2"
+seurat$CellType[seurat$seurat_clusters %in% c("3")] <- "PDGFRB+"
+seurat$CellType[seurat$seurat_clusters %in% c("4")] <- "Endo_vascular"
+seurat$CellType[seurat$seurat_clusters %in% c("5")] <- "Immune"
+seurat$CellType[seurat$seurat_clusters %in% c("6")] <- "Endo_lymphatic"
+seurat$CellType[seurat$seurat_clusters %in% c("7")] <- "Epi_ciliated"
+seurat$CellType[seurat$seurat_clusters %in% c("8")] <- "PNEC"
+```
+
+#Make the CellType into a factor
+```{r}
+seurat$CellType <- factor(seurat$CellType)
+```
+```{r}
+levels(seurat$CellType)
+```
+
+#Visualize
+```{r}
+DimPlot(seurat, label="T")
+DimPlot(seurat, group.by = "seurat_clusters")
+DimPlot(seurat, group.by="GA")
+DimPlot(seurat, group.by = "orig.ident")
+DimPlot(seurat, group.by = "Barcode")
+DimPlot(seurat, group.by = "CellType")
+```
+
+```{r}
+C_DimPlot <- DimPlot(seurat, group.by="CellType", label="T", label.size = 5,repel=TRUE)
+
+ggsave(C_DimPlot, filename="C:/..../C_DimPlot.png", width=10, height=6, dpi=600)
+```
+
+```{r}
+FeaturePlot <- FeaturePlot(seurat, features=c("COL5A1", "SFTPB", "PDGFRB", "PECAM1", "PTPRC", "PROX1", "DNAH12", "GRP"), ncol = 4 )
+ggsave(FeaturePlot, filename="C:/.../FeaturePlot.png",  width=18, height=7, dpi=600)
+```
+
+
+#Find markers
+```{r}
+Idents(seurat)<- "CellType"
+```
+```{r}
+markers <- FindAllMarkers(seurat, logfc.threshold=1, only.pos=T)
+write.csv(markers, file="C:/.../Cluster makers.csv", quote=F)
+```
+```{r}
+markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)
+```
+
+#Heatmap (simplified)
+```{r}
+Idents(seurat)<- "CellType"
+```
+```{r}
+top_markers <- read.csv("C:/..../Tables/",row.names=1)
+```
+# Get list of clusters/cell types
+```{r}
+cluster_list <- levels(Idents(seurat))
+```
+# Get top markers
+```{r}
+top_markers <- top_markers %>% 
+  group_by(cluster) %>% 
+  pull(gene) 
+```
+# Make function to calculate average expression in each cluster
+```{r}
+getAvgExp <- function(cluster){
+  cells <- colnames(seurat)[Idents(seurat) == cluster] 
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[top_markers, cells])) 
+  return(avg)}
+```
+# Calculate average expression of top_markers in each cluster
+```{r}
+avg_exp <- lapply(cluster_list, getAvgExp)
+avg_exp <- do.call("cbind", avg_exp)
+colnames(avg_exp) <- cluster_list
+```
+# Transform values to Z-scores
+```{r}
+avg_exp <- t(scale(t(avg_exp), scale=T, center=T))
+```
+# Make heatmap
+```{r}
+pheatmap(t(avg_exp),
+         color = viridis::inferno(105),
+         cluster_rows = F, 
+         cluster_cols = F,
+         border_color="black", #color around heatmap cells. Change as needed
+         breaks = seq(-0.5, 2, length.out=101), # this is the range of values for the colormap, adjust as desired. Usually has to be modified to get good contrast
+         legend=T, #switch to FALSE if the legend is getting in the way
+         filename = "C:/..../Heatmap main.png", dpi=600, width = 15, height = 2.3) #adjust width/height to make dimensions work
+```
+
+
+# Dotplot
+```{r}
+genes.to.plot <- c(
+"MMRN1", "TIE1", "NR2F2", "TBX1", "PTPN14", "FLT4", "PDPN", "PROX1", "LYVE1", 
+"FENDRR", "SEC14L1", "PTPRB", "JCAD", "TEK", "EFNB2", "FLT1", "KDR", "VWF", "PECAM1",
+"EFCAB6", "ARMC3", "DNAH7", "PACRG", "DNAH11", "CFAP157", "RP1", "AGBL4", "DNAH12", 
+"FREM2", "FGFR2", "NEDD4L", "LMO7", "LAMA3", "CADM1", "SFTPB", "ETV5", "FOXP2", "ALCAM", 
+"RUNX1", "CST3", "CD74", "CCL3", "HLA-DRB1", "TUBA1B", "PTPRC", "LGALS3", "C1QA", "C1QB", "ITGA2B", 
+"ROCK2", "PPP1R12A", "PAG1", "NCK2", "PTEN", "PRKCA", "MCAM", "ACTA2", "ENPEP", "PDGFRB", 
+"CADPS", "PCLO", "PTPRN2", "NOL4", "SRRM4", "NRXN1", "GRP", "SYP", "ASCL1", "CALCA",
+"ABCA8", "TCF21", "ADH1B", "COL1A1", 
+"VCAN", "MEOX2", "GPC3", "DCN", "ROBO2",
+"COL5A2", "EZH2", "HMGN2", "SDC2", "PDGFRA") 
+```
+```{r}
+seurat <- ScaleData(seurat, features = genes.to.plot)
+```
+```{r}
+DotPlot(seurat, features = rev(genes.to.plot), cols=c("deepskyblue", "navy"), dot.scale = 10) + RotatedAxis()
+```
+
+```{r}
+DotPlot <- DotPlot(seurat, features = rev(genes.to.plot), cols=c("deepskyblue", "navy"), dot.scale = 10) + RotatedAxis()
+
+ggsave(DotPlot,filename="C:/.../Dotplot.png", width=25, height=6, dpi=600)
+```
+
+# Calculate the number of cells per timepoint
+```{r}
+clusters_freq <- seurat@meta.data %>%
+  group_by(CellType, GA) %>%
+  summarise(n=n()) %>%
+  mutate(relative_freq = n/sum(n))
+
+write.csv(clusters_freq, file="C:/.../Cluster percentage.csv", quote=F, row.names = F)
+```
+

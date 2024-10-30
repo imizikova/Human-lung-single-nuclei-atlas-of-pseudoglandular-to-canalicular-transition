@@ -1,0 +1,381 @@
+---
+title: "Main data processing"
+output: html_notebook
+---
+```{r}
+library(Seurat)
+library(deMULTIplex)
+library(tidyverse)
+```
+
+```{r}
+fln1_mat <- Read10X("../data/FLN1/filtered_feature_bc_matrix/")
+fln2_mat <- Read10X("../data/FLN2/filtered_feature_bc_matrix/")
+```
+
+```{r}
+fln1 <- CreateSeuratObject(fln1_mat,
+                           min.cells = 10,
+                           min.features = 200,
+                          project = "FLN1")
+fln2 <- CreateSeuratObject(fln2_mat,
+                           min.cells = 10,
+                           min.features = 200,
+                           project = "FLN2")
+```
+
+# FLN1 processing
+```{r}
+fln1[["percent.mito"]] <- PercentageFeatureSet(fln1, pattern = "^MT-")
+VlnPlot(fln1, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size=0.25,
+        ncol = 3)
+```
+
+```{r}
+fln1 <- NormalizeData(fln1)
+fln1 <- FindVariableFeatures(fln1)
+fln1 <- ScaleData(fln1)
+fln1 <- RunPCA(fln1, verbose=F)
+fln1 <- RunUMAP(fln1, dims=1:35)
+```
+
+```{r}
+DimPlot(fln1)
+```
+
+```{r}
+fln1_keep <- colnames(fln1)
+fln1_keep <- gsub("-1", "", fln1_keep)
+```
+
+
+# FLN2 processing
+```{r}
+fln2[["percent.mito"]] <- PercentageFeatureSet(fln2, pattern = "^MT-")
+VlnPlot(fln2, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size=0.25,
+        ncol = 3)
+```
+
+```{r}
+fln2 <- NormalizeData(fln2)
+fln2 <- FindVariableFeatures(fln2)
+fln2 <- ScaleData(fln2)
+fln2 <- RunPCA(fln2, verbose=F)
+fln2 <- RunUMAP(fln2, dims=1:35)
+```
+
+```{r}
+DimPlot(fln2)
+```
+
+```{r}
+fln2_keep <- colnames(fln2)
+fln2_keep <- gsub("-1", "", fln2_keep)
+```
+
+
+# Demultiplexing
+```{r}
+bar.ref <- read.csv("../data/LMOlist.csv", header=F)$V1
+```
+
+## Quantify barcodes from fastq files
+```{r}
+readTable <- MULTIseq.preProcess(R1 = "../fastq/FLN1_R1_paired.fastq.gz",
+                                 R2 = "../fastq/FLN1_R2_paired.fastq.gz",
+                                 cellIDs = fln1_keep)
+FLN1_bar_table <- MULTIseq.align(readTable, fln1_keep, bar.ref)
+write.csv(FLN1_bar_table, file="../data/FLN1_barcode_counts.csv", quote=F)
+
+readTable <- MULTIseq.preProcess(R1 = "../fastq/FLN2_R1_paired.fastq.gz",
+                                 R2 = "../fastq/FLN2_R2_paired.fastq.gz",
+                                 cellIDs = fln2_keep)
+FLN2_bar_table <- MULTIseq.align(readTable, fln2_keep, bar.ref)
+write.csv(FLN2_bar_table, file="../data/FLN2_barcode_counts.csv", quote=F)
+```
+
+## FLN1 annotation
+```{r}
+FLN1_bar_table <- read.csv("../data/FLN1_barcode_counts.csv", row.names=1)
+```
+
+```{r}
+FLN1_tsne <- barTSNE(FLN1_bar_table[,c(1,2,4,5,9,10,11,12,13,14)])
+```
+
+```{r}
+fln1.temp <- FLN1_bar_table
+fln1.temp$TSNE1 <- FLN1_tsne$TSNE1
+fln1.temp$TSNE2 <- FLN1_tsne$TSNE2
+write.csv(fln1.temp, file="../output/FLN1_barcode_tsne.csv", quote=F)
+```
+
+```{r}
+temp <- as.matrix(FLN1_tsne[,3:12])
+temp[temp<0] <- 0
+temp <- as.data.frame(temp)
+temp$TSNE1 <- FLN1_tsne$TSNE1
+temp$TSNE2 <- FLN1_tsne$TSNE2
+
+
+for (LMO in colnames(FLN1_tsne)[3:12]){
+  png(filename = paste0("../figs/LMOs/FLN1/",LMO,".png"), width = 700, height = 600)
+  p <- ggplot(data=temp, aes_string(x="TSNE1",y="TSNE2",color=LMO)) + geom_point() +
+    scale_color_gradient(low="lightgrey",high="red") +
+    theme_void()
+  print(p)
+  dev.off()
+}
+```
+
+```{r}
+FLN1_bar_filtered <- FLN1_bar_table[,c(1,2,4,5,9,10,11,12,13,14)]
+```
+
+```{r}
+bar.table_sweep.list <- list()
+n <- 0
+for (q in seq(0.01, 0.99, by=0.02)) {
+  print(q)
+  n <- n + 1
+  bar.table_sweep.list[[n]] <- classifyCells(FLN1_bar_filtered, q=q)
+  names(bar.table_sweep.list)[n] <- paste("q=",q,sep="")
+}
+```
+
+```{r}
+threshold.results1 <- findThresh(call.list=bar.table_sweep.list)
+ggplot(data=threshold.results1$res, aes(x=q, y=Proportion, color=Subset)) + geom_line() + theme(legend.position = "none") +
+  geom_vline(xintercept=threshold.results1$extrema, lty=2) + scale_color_manual(values=c("red","black","blue"))
+```
+
+```{r}
+## Finalize round 1 classifications, remove negative cells
+round1.calls <- classifyCells(FLN1_bar_filtered, q=findQ(threshold.results1$res, threshold.results1$extrema))
+neg.cells <- names(round1.calls)[which(round1.calls == "Negative")]
+FLN1_bar_filtered <- FLN1_bar_filtered[-which(rownames(FLN1_bar_filtered) %in% neg.cells), ]
+```
+
+```{r}
+FLN1_tsne$Classification <- "Singlet"
+FLN1_tsne$Classification[which(round1.calls[rownames(FLN1_tsne)]=="Doublet")] <- "Doublet"
+FLN1_tsne$Classification[which(round1.calls[rownames(FLN1_tsne)]=="Negative")] <- "Negative"
+```
+
+```{r}
+table(FLN1_tsne$Classification)
+```
+
+```{r}
+tsne_classification <- ggplot(FLN1_tsne, aes(x=TSNE1, y=TSNE2)) +
+  geom_point(size=0.25, aes(color=Classification)) +
+  theme_void()
+ggsave(tsne_classification, file="../figs/FLN1_Barcode_TSNE.png",
+       width=6, height=4.5)
+tsne_classification
+```
+
+## Assess sample classifications on TSNE
+```{r}
+fln1_samples <- unique(round1.calls)
+plotSampleTSNE <- function(sample){
+  data <- FLN1_tsne
+  data$Sample <- "Other"
+  data$Sample[which(round1.calls[rownames(FLN1_tsne)]==sample)] <- sample
+  sample_plot <- ggplot(data, aes(x=TSNE1, y=TSNE2)) +
+    geom_point(size=0.25, alpha=0.5, aes(color=Sample)) +
+    scale_color_manual(values=c("red", "lightgrey")) +
+    theme_void()
+  ggsave(sample_plot, file=paste0("../figs/LMOs/FLN1/Classifications/", 
+         sample,".png"), width=5, height=3.2)
+}
+```
+
+```{r}
+lapply(fln1_samples, plotSampleTSNE)
+```
+
+```{r}
+fln1$Barcode <- round1.calls
+```
+
+## FLN2 annotation
+```{r}
+FLN2_bar_table <- read.csv("../data/FLN2_barcode_counts.csv", row.names=1)
+```
+
+```{r}
+FLN2_tsne <- barTSNE(FLN2_bar_table[,c(1,2,4,5,9,10,11,12,13,14)])
+```
+
+```{r}
+fln2.temp <- FLN2_bar_table
+fln2.temp$TSNE1 <- FLN2_tsne$TSNE1
+fln2.temp$TSNE2 <- FLN2_tsne$TSNE2
+write.csv(fln2.temp, file="../output/FLN2_barcode_tsne.csv", quote=F)
+```
+
+```{r}
+temp <- as.matrix(FLN2_tsne[,3:12])
+temp[temp<0] <- 0
+temp <- as.data.frame(temp)
+temp$TSNE1 <- FLN2_tsne$TSNE1
+temp$TSNE2 <- FLN2_tsne$TSNE2
+
+
+for (LMO in colnames(FLN2_tsne)[3:12]){
+  png(filename = paste0("../figs/LMOs/FLN2/",LMO,".png"), width = 700, height = 600)
+  p <- ggplot(data=temp, aes_string(x="TSNE1",y="TSNE2",color=LMO)) + geom_point() +
+    scale_color_gradient(low="lightgrey",high="red") +
+    theme_void()
+  print(p)
+  dev.off()
+}
+```
+
+```{r}
+FLN2_bar_filtered <- FLN2_bar_table[,c(1,2,4,5,9,10,11,12,13,14)]
+```
+
+```{r}
+bar.table_sweep.list <- list()
+n <- 0
+for (q in seq(0.01, 0.99, by=0.02)) {
+  print(q)
+  n <- n + 1
+  bar.table_sweep.list[[n]] <- classifyCells(FLN2_bar_filtered, q=q)
+  names(bar.table_sweep.list)[n] <- paste("q=",q,sep="")
+}
+```
+
+```{r}
+threshold.results1 <- findThresh(call.list=bar.table_sweep.list)
+ggplot(data=threshold.results1$res, aes(x=q, y=Proportion, color=Subset)) + geom_line() + theme(legend.position = "none") +
+  geom_vline(xintercept=threshold.results1$extrema, lty=2) + scale_color_manual(values=c("red","black","blue"))
+```
+
+```{r}
+## Finalize round 1 classifications, remove negative cells
+round1.calls <- classifyCells(FLN2_bar_filtered, q=findQ(threshold.results1$res, threshold.results1$extrema))
+neg.cells <- names(round1.calls)[which(round1.calls == "Negative")]
+FLN2_bar_filtered <- FLN2_bar_filtered[-which(rownames(FLN2_bar_filtered) %in% neg.cells), ]
+```
+
+```{r}
+FLN2_tsne$Classification <- "Singlet"
+FLN2_tsne$Classification[which(round1.calls[rownames(FLN2_tsne)]=="Doublet")] <- "Doublet"
+FLN2_tsne$Classification[which(round1.calls[rownames(FLN2_tsne)]=="Negative")] <- "Negative"
+```
+
+```{r}
+table(FLN2_tsne$Classification)
+```
+
+```{r}
+tsne_classification <- ggplot(FLN2_tsne, aes(x=TSNE1, y=TSNE2)) +
+  geom_point(size=0.25, aes(color=Classification)) +
+  theme_void()
+ggsave(tsne_classification, file="../figs/FLN2_Barcode_TSNE.png",
+       width=6, height=4.5)
+tsne_classification
+```
+
+## Assess sample classifications on TSNE
+```{r}
+fln2_samples <- unique(round1.calls)
+plotSampleTSNE <- function(sample){
+  data <- FLN2_tsne
+  data$Sample <- "Other"
+  data$Sample[which(round1.calls[rownames(FLN2_tsne)]==sample)] <- sample
+  sample_plot <- ggplot(data, aes(x=TSNE1, y=TSNE2)) +
+    geom_point(size=0.25, alpha=0.5, aes(color=Sample)) +
+    scale_color_manual(values=c("red", "lightgrey")) +
+    theme_void()
+  ggsave(sample_plot, file=paste0("../figs/LMOs/FLN2/Classifications/", 
+         sample,".png"), width=5, height=3.2)
+}
+```
+
+```{r}
+lapply(fln2_samples, plotSampleTSNE)
+```
+
+```{r}
+fln2$Barcode <- round1.calls
+```
+
+# Merge seurat objects
+```{r}
+seurat <- merge(fln1, fln2, add.cell.ids=c("FLN1", "FLN2"))
+```
+
+Basic processing
+```{r}
+seurat <- NormalizeData(seurat)
+seurat <- FindVariableFeatures(seurat)
+seurat <- ScaleData(seurat)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:35)
+seurat <- FindNeighbors(seurat, dims=1:35)
+seurat <- FindClusters(seurat, resolution=0.25)
+```
+
+# Add sample annotations
+```{r}
+sample_annotations <- data.frame(Barcode = paste0("Bar", c(1,2,4,5,9,10,11,12,13,14)),
+                                 GA = c("19+0", "18+2", "16+0", "16+3", "14+3", "15+5",
+                                        "16+3", "15+1", "17+5", "14+1"),
+                                 CollectionDate = c("20190417", "20190417", "20190529", "20190529",
+                                                    "20191002", "20191002", "20191016", "20191112",
+                                                    "20200205", "20200304"))
+```
+
+```{r}
+seurat$GA <- sample_annotations$GA[match(seurat$Barcode, sample_annotations$Barcode)]
+seurat$CollectionDate <- sample_annotations$CollectionDate[match(seurat$Barcode, sample_annotations$Barcode)]
+```
+
+# Visualize
+```{r}
+DimPlot(seurat)
+DimPlot(seurat, group.by="GA")
+```
+
+```{r}
+ggsave(DimPlot(seurat, group.by="GA"),
+       filename = "../figs/umap_unfiltered.png",
+       width = 5, height=4)
+```
+
+```{r}
+saveRDS(seurat, file="../data/seurat_unfiltered.rds")
+```
+
+# Remove doublets and negatives
+```{r}
+cells_keep <- colnames(seurat)[!is.na(seurat$GA)]
+seurat <- subset(seurat, cells=cells_keep)
+```
+
+```{r}
+seurat <- SCTransform(seurat)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:35)
+seurat <- FindNeighbors(seurat, dims=1:35)
+seurat <- FindClusters(seurat, resolution=0.25)
+```
+
+```{r}
+DimPlot(seurat)
+DimPlot(seurat, group.by="GA")
+DimPlot(seurat, group.by="Barcode")
+```
+
+```{r}
+saveRDS(seurat, file="../data/seurat_filtered.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

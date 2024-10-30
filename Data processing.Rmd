@@ -1,0 +1,69 @@
+---
+title: "Data processing_integrating filtered data"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridisLite)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+```
+
+
+```{r}
+lungs <- readRDS("~//seurat_filtered.rds")
+```
+
+```{r}
+cells_keep <- colnames(lungs)[lungs$Barcode %in% c("Bar1", "Bar10", "Bar12", "Bar13", "Bar14","Bar2", "Bar4","Bar5", "Bar9")]
+lungs_subset <- subset(lungs, cells=cells_keep)
+```
+
+#Integrate data
+```{r}
+seurat.list <- SplitObject(lungs_subset, split.by="GA")
+```
+```{r}
+for(i in 1:length(seurat.list)){
+seurat.list[[i]] <- NormalizeData(seurat.list[[i]]) #ensures the @data slot is available in the RNA assay for cell cycle scoring
+seurat.list[[i]] <- CellCycleScoring(seurat.list[[i]], s.features=cc.genes.updated.2019$s.genes, g2m.features=cc.genes.updated.2019$g2m.genes) #Does the scoring
+seurat.list[[i]] <- SCTransform(seurat.list[[i]], vars.to.regress=c("S.Score", "G2M.Score"), verbose=F) #Normalizes with SCTransform, regressing out cell cycle
+}
+```
+```{r}
+seurat.features <- SelectIntegrationFeatures(seurat.list, 
+                                             nfeatures = 3000)
+seurat.list <- PrepSCTIntegration(seurat.list, 
+                                  anchor.features = seurat.features,
+                                  verbose = FALSE)
+seurat.anchors <- FindIntegrationAnchors(seurat.list, 
+                                         normalization.method = "SCT",
+                                         anchor.features = seurat.features,
+                                         verbose = FALSE)
+seurat.integrated <- IntegrateData(seurat.anchors, 
+                                    normalization.method = "SCT",
+                                    verbose = FALSE)
+```
+
+#Recluster
+```{r}
+seurat.integrated <- RunPCA(seurat.integrated, verbose=F)
+seurat.integrated <- RunUMAP(seurat.integrated, dims=1:20)
+seurat.integrated <- FindNeighbors(seurat.integrated, dims=1:20)
+seurat.integrated <- FindClusters(seurat.integrated, resolution=0.05)
+```
+
+# Re-embed non-aligned data
+```{r}
+DefaultAssay(seurat.integrated) <- "RNA"
+seurat.integrated <- SCTransform(seurat.integrated, vars.to.regress=c("S.Score", "G2M.Score"))
+seurat.integrated <- RunPCA(seurat.integrated, verbose=F)
+seurat.integrated <- RunUMAP(seurat.integrated, dims=1:20)
+```
+
+```{r}
+saveRDS(seurat.integrated, file = "~/.../Full dataset")
+```
