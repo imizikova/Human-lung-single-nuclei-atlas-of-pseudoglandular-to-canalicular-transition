@@ -1,0 +1,37 @@
+---
+title: "Subclustering_PNEC"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridisLite)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+library(sctransform)
+```
+
+```{r}
+lungs <- readRDS("C:/.../Full dataset.rds")
+```
+
+```{r}
+cells_keep <- colnames(lungs)[lungs$seurat_clusters %in% c(8)]
+PNEC_subset <- subset(lungs, cells=cells_keep)
+```
+
+#Recluster
+```{r}
+PNEC_subset <- RunUMAP(PNEC_subset, dims=1:35)
+PNEC_subset <- FindNeighbors(PNEC_subset, dims=1:35)
+PNEC_subset <- FindClusters(PNEC_subset, resolution=0.25)
+```
+
+#Save new seurat object
+```{r}
+saveRDS(PNEC_subset, "C:/.../PNEC.rds")
+```
+
+

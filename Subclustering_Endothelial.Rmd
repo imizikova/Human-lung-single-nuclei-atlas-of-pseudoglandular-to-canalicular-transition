@@ -1,0 +1,70 @@
+---
+title: "Subclustering_endothelium"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridisLite)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+library(sctransform)
+```
+
+```{r}
+lungs <- readRDS("C:/.../Full dataset.rds")
+```
+
+```{r}
+cells_keep <- colnames(lungs)[lungs$seurat_clusters %in% c(4,6)]
+Endothelial_subset <- subset(lungs, cells=cells_keep)
+```
+
+
+#Integrate data
+```{r}
+seurat.list <- SplitObject(Endothelial_subset, split.by="GA")
+
+for(i in 1:length(seurat.list)){
+seurat.list[[i]] <- NormalizeData(seurat.list[[i]]) #ensures the @data slot is available in the RNA assay for cell cycle scoring
+seurat.list[[i]] <- CellCycleScoring(seurat.list[[i]], s.features=cc.genes.updated.2019$s.genes, g2m.features=cc.genes.updated.2019$g2m.genes) #Does the scoring
+seurat.list[[i]] <- SCTransform(seurat.list[[i]], vars.to.regress=c("S.Score", "G2M.Score"), verbose=F) #Normalizes with SCTransform, regressing out cell cycle
+}
+
+seurat.features <- SelectIntegrationFeatures(seurat.list, nfeatures = 500)
+seurat.list <- PrepSCTIntegration(seurat.list, anchor.features = seurat.features, verbose = FALSE)
+seurat.anchors <- FindIntegrationAnchors(seurat.list, normalization.method = "SCT", anchor.features = seurat.features, dims = 1:20, k.filter = 20, k.score=20, k.anchor=20, verbose = FALSE)
+seurat.integrated <- IntegrateData(seurat.anchors, normalization.method = "SCT", k.weight = 20, dims=1:20, verbose = FALSE)
+```
+
+#Recluster
+```{r}
+seurat.integrated <- RunPCA(seurat.integrated, verbose=F)
+seurat.integrated <- RunUMAP(seurat.integrated, dims=1:20)
+seurat.integrated <- FindNeighbors(seurat.integrated, dims=1:20)
+seurat.integrated <- FindClusters(seurat.integrated, resolution=0.15)
+```
+
+```{r}
+DimPlot(seurat.integrated, label=T)
+DimPlot(seurat.integrated, group.by="GA")
+DimPlot(seurat.integrated, group.by="Barcode")
+```
+```{r}
+ElbowPlot(seurat.integrated, ndims=50)
+```
+
+# Re-embedding
+```{r}
+DefaultAssay(seurat.integrated) <- "RNA"
+seurat.integrated <- SCTransform(seurat.integrated, vars.to.regress=c("S.Score", "G2M.Score"))
+seurat.integrated <- RunPCA(seurat.integrated, verbose=F)
+seurat.integrated <- RunUMAP(seurat.integrated, dims=1:20)
+```
+
+#Save new seurat object
+```{r}
+saveRDS(seurat.integrated, "C:/.../Endothelial.rds")
+```

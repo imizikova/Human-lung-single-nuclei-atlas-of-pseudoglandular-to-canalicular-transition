@@ -1,0 +1,81 @@
+ ---
+title: "Subclustering_stroma"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridisLite)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+library(sctransform)
+```
+
+```{r}
+lungs <- readRDS("C:/.../Full dataset.rds")
+```
+
+```{r}
+cells_keep <- colnames(lungs)[lungs$seurat_clusters %in% c(0,2)]
+Stromal_subset <- subset(lungs, cells=cells_keep)
+```
+
+
+#Integrate data
+```{r}
+seurat.list <- SplitObject(Stromal_subset, split.by="GA")
+                           
+for(i in 1:length(seurat.list)){
+seurat.list[[i]] <- NormalizeData(seurat.list[[i]]) #ensures the @data slot is available in the RNA assay for cell cycle scoring
+seurat.list[[i]] <- CellCycleScoring(seurat.list[[i]], s.features=cc.genes.updated.2019$s.genes, g2m.features=cc.genes.updated.2019$g2m.genes) #Does the scoring
+seurat.list[[i]] <- SCTransform(seurat.list[[i]], vars.to.regress=c("S.Score", "G2M.Score"), verbose=F) #Normalizes with SCTransform, regressing out cell cycle
+}
+```
+
+```{r}
+seurat.features <- SelectIntegrationFeatures(seurat.list, 
+                                             nfeatures = 3000)
+seurat.list <- PrepSCTIntegration(seurat.list, 
+                                  anchor.features = seurat.features,
+                                  verbose = FALSE)
+seurat.anchors <- FindIntegrationAnchors(seurat.list, 
+                                         normalization.method = "SCT",
+                                         anchor.features = seurat.features,
+                                         verbose = FALSE)
+seurat.integrated <- IntegrateData(seurat.anchors, 
+                                    normalization.method = "SCT",
+                                    verbose = FALSE)
+```
+
+
+#Recluster >> V1 (3000), V2 (500)
+```{r}
+seurat.integratedY <- RunPCA(seurat.integrated, verbose=F)
+seurat.integratedY <- RunUMAP(seurat.integratedY, dims=1:20)
+seurat.integratedY <- FindNeighbors(seurat.integratedY, dims=1:20)
+seurat.integratedX <- FindClusters(seurat.integratedY, resolution=0.1)
+```
+
+```{r}
+DimPlot(seurat.integratedX, label=T)
+DimPlot(seurat.integratedX, group.by="GA")
+DimPlot(seurat.integratedX, group.by="Barcode")
+```
+```{r}
+ElbowPlot(seurat.integratedX, ndims=50)
+```
+
+# Re-embedding
+```{r}
+DefaultAssay(seurat.integratedX) <- "RNA"
+seurat.integratedB <- SCTransform(seurat.integratedX, vars.to.regress=c("S.Score", "G2M.Score"))
+seurat.integratedC <- RunPCA(seurat.integratedB, verbose=F)
+seurat.integratedA <- RunUMAP(seurat.integratedC, dims=1:20)
+```
+
+#Save new seurat object
+```{r}
+saveRDS(seurat.integratedA, "C:/.../Stromal.rds")
+```

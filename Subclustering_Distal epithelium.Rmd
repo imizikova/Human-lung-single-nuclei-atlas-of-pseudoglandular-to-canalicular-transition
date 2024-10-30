@@ -1,0 +1,83 @@
+---
+title: "Subclustering epithelium"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(viridisLite)
+library(viridis)
+library(dplyr)
+library(pheatmap)
+library(sctransform)
+```
+
+```{r}
+lungs <- readRDS("C:/.../Full dataset.rds")
+```
+
+```{r}
+cells_keep <- colnames(lungs)[lungs$seurat_clusters %in% c(1)]
+Epithelial_subset <- subset(lungs, cells=cells_keep)
+```
+
+
+#Integrate data
+```{r}
+seurat.list <- SplitObject(Epithelial_subset, split.by="GA")
+
+for(i in 1:length(seurat.list)){
+seurat.list[[i]] <- NormalizeData(seurat.list[[i]]) #ensures the @data slot is available in the RNA assay for cell cycle scoring
+seurat.list[[i]] <- CellCycleScoring(seurat.list[[i]], s.features=cc.genes.updated.2019$s.genes, g2m.features=cc.genes.updated.2019$g2m.genes) #Does the scoring
+seurat.list[[i]] <- SCTransform(seurat.list[[i]], vars.to.regress=c("S.Score", "G2M.Score"), verbose=F) #Normalizes with SCTransform, regressing out cell cycle
+}
+```
+
+```{r}
+seurat.features <- SelectIntegrationFeatures(seurat.list, 
+                                             nfeatures = 500)
+seurat.list <- PrepSCTIntegration(seurat.list, 
+                                  anchor.features = seurat.features,
+                                  verbose = FALSE)
+seurat.anchors <- FindIntegrationAnchors(seurat.list, 
+                                         normalization.method = "SCT",
+                                         anchor.features = seurat.features, k.filter = 30, verbose = FALSE)
+seurat.integrated <- IntegrateData(seurat.anchors, normalization.method = "SCT", k.weight = 30, dims=1:30, verbose = FALSE)
+```
+
+#Recluster
+```{r}
+seurat.integratedA <- RunPCA(seurat.integrated, verbose=F)
+seurat.integratedA <- RunUMAP(seurat.integratedA, dims=1:20)
+seurat.integratedA <- FindNeighbors(seurat.integratedA, dims=1:20)
+seurat.integratedB <- FindClusters(seurat.integratedA, resolution=0.20)
+```
+
+```{r}
+DimPlot(seurat.integratedB, label=T)
+DimPlot(seurat.integratedB, group.by="GA")
+DimPlot(seurat.integratedB, group.by="Barcode")
+```
+```{r}
+ElbowPlot(seurat.integratedB, ndims=50)
+```
+
+```{r}
+cells_keep <- colnames(seurat.integratedB)[seurat.integratedB$seurat_clusters %in% c(0, 1, 2)]
+seurat.integratedB <- subset(seurat.integratedB, cells=cells_keep)
+```
+
+
+# Re-embedding
+```{r}
+DefaultAssay(seurat.integratedB) <- "RNA"
+seurat.integratedB <- SCTransform(seurat.integratedB, vars.to.regress=c("S.Score", "G2M.Score"))
+seurat.integratedB <- RunPCA(seurat.integratedB, verbose=F)
+seurat.integratedC <- RunUMAP(seurat.integratedB, dims=1:10)
+```
+
+#Save new seurat object
+```{r}
+saveRDS(seurat.integratedC, "C:/.../Epithelial.rds")
+```
